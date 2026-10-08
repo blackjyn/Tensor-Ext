@@ -158,4 +158,165 @@ jobs:
 
           for /f "delims=" %%i in ('php -r "echo PHP_VERSION_ID;"') do set PHP_VERSION_ID=%%i
           for /f "delims=" %%i in ('php -r "echo PHP_PREFIX;"') do set PHP_PREFIX=%%i
-
+
+          echo PHP_VERSION_ID=%PHP_VERSION_ID%
+          echo PHP_PREFIX=%PHP_PREFIX%
+
+          REM Setup Visual Studio environment
+          set "VsDevCmd=C:\Program Files\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat"
+          if exist "%VsDevCmd%" (
+            echo Setting up Visual Studio environment...
+            call "%VsDevCmd%" -arch=x64 -host_arch=x64
+          ) else (
+            echo WARNING: VsDevCmd.bat not found, attempting without it...
+          )
+
+          REM Create a minimal Makefile.win32 if the Zephir build didn't provide one.
+          if not exist "Makefile.win32" (
+            echo Creating minimal Makefile.win32...
+            (
+              echo ZEPHIR_CFLAGS=/DZEPHIR_RELEASE=1 /O2 /GL /Oy /Oi /Ot /Og /Oy
+              echo PHP_INCLUDES=/I "%PHP_PREFIX%\include"
+              echo OBLAS_INCLUDES=/I "%OPENBLAS_HOME%\include"
+              echo LAPACK_INCLUDES=/I "%LAPACK_HOME%\include"
+              echo.
+              echo OBJS=tensor_ext.obj
+              echo.
+              echo all: php_tensor.dll
+              echo.
+              echo php_tensor.dll: $^(OBJS^)
+              echo   link.exe /DLL /OUT:php_tensor.dll $^(OBJS^) "%PHP_PREFIX%\lib\php.lib"
+              echo.
+              echo tensor_ext.obj: tensor_ext.c
+              echo   cl.exe /c /DZEPHIR_RELEASE=1 $^(PHP_INCLUDES^) $^(OBLAS_INCLUDES^) $^(LAPACK_INCLUDES^) tensor_ext.c
+              echo.
+              echo clean:
+              echo   del *.obj *.dll 2^>nul
+            ) > Makefile.win32
+            echo Makefile.win32 created successfully
+          )
+
+          if not exist "Makefile.win32" (
+            echo ERROR: Failed to create Makefile.win32
+            exit /b 1
+          )
+
+          echo === Attempting nmake build ===
+          nmake /f Makefile.win32 clean
+          if exist "php_tensor.dll" del php_tensor.dll
+          nmake /f Makefile.win32
+
+          if errorlevel 1 (
+            echo Build failed!
+            exit /b 1
+          )
+
+      - name: Find and verify DLL
+        shell: powershell
+        run: |
+          Write-Output "=== Searching for compiled DLL ==="
+          $dlls = @()
+
+          Get-ChildItem -Path "." -Recurse -Include "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Output "Found DLL: $($_.FullName)"
+            if ($_.Name -match "tensor|php_tensor") {
+              $dlls += $_.FullName
+            }
+          }
+
+          if ($dlls.Count -eq 0) {
+            Write-Output "ERROR: No tensor DLL found!"
+            Write-Output "=== Contents of ext directory ==="
+            Get-ChildItem -Path "ext" -Recurse
+            exit 1
+          }
+
+          $targetDll = $dlls[0]
+          Write-Output "✓ Using DLL: $targetDll"
+          Write-Output "  Size: $($(Get-Item $targetDll).Length) bytes"
+
+          "DLL_PATH=$targetDll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Create artifact
+        shell: powershell
+        run: |
+          Write-Output "=== Preparing artifact ==="
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+
+          if ($env:DLL_PATH -and (Test-Path $env:DLL_PATH)) {
+            Copy-Item -Path "$env:DLL_PATH" -Destination "artifact\php_tensor-8.5-x64-nts.dll" -Verbose
+            Write-Output "✓ Artifact ready:"
+            Get-ChildItem artifact
+          } else {
+            Write-Output "ERROR: DLL_PATH not set or file not found!"
+            exit 1
+          }
+
+      - name: Upload DLL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tensor-php85-x64-nts
+          path: artifact/php_tensor-8.5-x64-nts.dll
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifact/php_tensor-8.5-x64-nts.dll
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          body: |
+            # Tensor Extension ${{ github.ref_name }} - PHP 8.5 Windows Binary
+
+            **Pre-built DLL for Windows (PHP 8.5 x64 NTS)**
+
+            ## Files
+            - `php_tensor-8.5-x64-nts.dll`
+
+            ## Installation
+            1. Download `php_tensor-8.5-x64-nts.dll`
+            2. Place it in your PHP `ext/` directory
+            3. Add to `php.ini`:
+               ```
+               extension=php_tensor.dll
+               ```
+            4. Verify:
+               ```
+               php -m | find "tensor"
+               ```
+
+            ## Build Details
+            - PHP Version: 8.5 (NTS)
+            - Architecture: x64 (64-bit)
+            - Compiled with OpenBLAS and LAPACK via vcpkg
+            - Built on: ${{ github.event.head_commit.timestamp }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Capture debug logs on failure
+        if: failure()
+        shell: powershell
+        run: |
+          Write-Output "`n=== Build Failure Diagnostics ==="
+          Write-Output "PHP Environment:"
+          php -v
+          composer --version
+
+          Write-Output "`nVisual Studio Tools:"
+          where cl.exe
+          where nmake.exe
+          where zephir
+
+          Write-Output "`nDirectory Contents:"
+          Write-Output "=== ext directory ==="
+          Get-ChildItem ext -Include "*.obj","*.dll","*.exe","*.lib","Makefile*","*.c","*.h" -Recurse | Select-Object FullName, Length | Head -50
+
+          if (Test-Path "ext\config.log") {
+            Write-Output "`n=== config.log (first 100 lines) ==="
+            Get-Content ext\config.log -Head 100
+          }
+
+          Write-Output "`n=== Build artifacts ==="
+          Get-ChildItem -Path "." -Recurse -Include "*.dll" -ErrorAction SilentlyContinue | Select-Object FullName
