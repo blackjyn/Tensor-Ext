@@ -1,0 +1,183 @@
+name: Build Windows DLL (PHP 8.5)
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    tags:
+      - "v*"
+    paths:
+      - ".github/workflows/build-windows-dll-php85.yml"
+      - "tensor/**"
+      - "ext/**"
+      - "config.json"
+      - "composer.json"
+  pull_request:
+    branches:
+      - master
+      - main
+    paths:
+      - ".github/workflows/build-windows-dll-php85.yml"
+      - "tensor/**"
+      - "ext/**"
+      - "config.json"
+      - "composer.json"
+  workflow_dispatch:
+
+jobs:
+  build-windows-dll-php85:
+    name: PHP 8.5 x64 NTS DLL Build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.5 with development headers
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.5"
+          extensions: json
+          tools: composer
+          coverage: none
+
+      - name: Verify PHP version
+        shell: cmd
+        run: |
+          php -v
+          php -m | findstr json
+
+      - name: Install build tools
+        shell: cmd
+        run: |
+          choco install -y cmake ninja
+
+      - name: Setup vcpkg and install dependencies
+        shell: cmd
+        run: |
+          if not exist "C:\\vcpkg" (
+            git clone https://github.com/Microsoft/vcpkg.git C:\\vcpkg
+          )
+          cd /d C:\\vcpkg
+          if not exist "vcpkg.exe" call bootstrap-vcpkg.bat
+          vcpkg integrate install
+          vcpkg install openblas:x64-windows lapacke:x64-windows
+
+      - name: Set environment variables for build
+        shell: powershell
+        run: |
+          "OPENBLAS_HOME=C:\vcpkg\installed\x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LAPACKE_HOME=C:\vcpkg\installed\x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LIB=C:\vcpkg\installed\x64-windows\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "INCLUDE=C:\vcpkg\installed\x64-windows\include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install Composer dependencies
+        shell: cmd
+        run: composer install --prefer-dist --no-progress
+
+      - name: Generate Zephir code
+        shell: cmd
+        run: composer generate
+
+      - name: Compile Zephir extension
+        shell: cmd
+        run: composer compile
+
+      - name: Build DLL via phpize
+        shell: cmd
+        run: |
+          cd ext
+          call phpize.bat
+          call configure.bat ^
+            --with-openblas=C:\\vcpkg\\installed\\x64-windows ^
+            --with-lapacke=C:\\vcpkg\\installed\\x64-windows ^
+            --enable-tensor
+          nmake clean
+          nmake
+          if errorlevel 1 (
+            echo Build failed!
+            exit /b 1
+          )
+
+      - name: Verify DLL creation
+        shell: powershell
+        run: |
+          $dll = Get-ChildItem -Path "ext" -Filter "php_tensor.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($dll) {
+            Write-Output "✓ DLL built successfully!"
+            Write-Output "  Path: $($dll.FullName)"
+            Write-Output "  Size: $($dll.Length) bytes"
+            "DLL_PATH=$($dll.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            Write-Output "✗ ERROR: DLL not found!"
+            Write-Output "Searching for any DLL files..."
+            Get-ChildItem -Path "ext" -Recurse -Include "*.dll"
+            exit 1
+          }
+
+      - name: Create artifact directory
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item -Path "$env:DLL_PATH" -Destination "artifact\php_tensor-8.5-x64-nts.dll"
+          Write-Output "✓ Artifact prepared"
+          Get-ChildItem artifact
+
+      - name: Upload DLL as GitHub artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tensor-php85-x64-nts
+          path: artifact/php_tensor-8.5-x64-nts.dll
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifact/php_tensor-8.5-x64-nts.dll
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          body: |
+            # Tensor Extension ${{ github.ref_name }} - PHP 8.5 Windows Binary
+
+            **Pre-built DLL for Windows (PHP 8.5 x64 NTS)**
+
+            ## Files
+            - `php_tensor-8.5-x64-nts.dll`
+
+            ## Installation
+            1. Download `php_tensor-8.5-x64-nts.dll`
+            2. Place it in your PHP `ext/` directory
+            3. Add to `php.ini`:
+               ```
+               extension=php_tensor.dll
+               ```
+            4. Verify:
+               ```
+               php -m | find "tensor"
+               ```
+
+            ## Build Details
+            - PHP Version: 8.5 (NTS)
+            - Architecture: x64 (64-bit)
+            - Compiled with OpenBLAS and LAPACKE via vcpkg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Show build logs on failure
+        if: failure()
+        shell: powershell
+        run: |
+          Write-Output "`n=== Build Environment ==="
+          php -v
+          composer --version
+
+          if (Test-Path "ext\config.log") {
+            Write-Output "`n=== Configure Log ==="
+            Get-Content ext\config.log -Head 50
+          }
+
+          Write-Output "`n=== Files in ext directory ==="
+          Get-ChildItem ext -Include "*.obj","*.dll","*.exe" -Recurse
