@@ -22,7 +22,6 @@ on:
       - "tensor/**"
       - "ext/**"
       - "config.json"
-      - "composer.json"
   workflow_dispatch:
 
 jobs:
@@ -56,19 +55,19 @@ jobs:
       - name: Setup vcpkg and install dependencies
         shell: cmd
         run: |
-          if not exist "C:\\vcpkg" (
-            git clone https://github.com/Microsoft/vcpkg.git C:\\vcpkg
+          if not exist "C:\vcpkg" (
+            git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
           )
-          cd /d C:\\vcpkg
+          cd /d C:\vcpkg
           if not exist "vcpkg.exe" call bootstrap-vcpkg.bat
           vcpkg integrate install
-          vcpkg install openblas:x64-windows lapacke:x64-windows
+          vcpkg install openblas:x64-windows lapack:x64-windows
 
       - name: Set environment variables for build
         shell: powershell
         run: |
           "OPENBLAS_HOME=C:\vcpkg\installed\x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "LAPACKE_HOME=C:\vcpkg\installed\x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LAPACK_HOME=C:\vcpkg\installed\x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "LIB=C:\vcpkg\installed\x64-windows\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "INCLUDE=C:\vcpkg\installed\x64-windows\include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -90,8 +89,8 @@ jobs:
           cd ext
           call phpize.bat
           call configure.bat ^
-            --with-openblas=C:\\vcpkg\\installed\\x64-windows ^
-            --with-lapacke=C:\\vcpkg\\installed\\x64-windows ^
+            --with-openblas=C:\vcpkg\installed\x64-windows ^
+            --with-lapack=C:\vcpkg\installed\x64-windows ^
             --enable-tensor
           nmake clean
           nmake
@@ -162,7 +161,7 @@ jobs:
             ## Build Details
             - PHP Version: 8.5 (NTS)
             - Architecture: x64 (64-bit)
-            - Compiled with OpenBLAS and LAPACKE via vcpkg
+            - Compiled with OpenBLAS and LAPACK via vcpkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
